@@ -99,6 +99,30 @@ module axi_lite_tb;
     .s_rready  (s_rready)
   );
 
+  // ── SVA Monitor ──────────────────────────────────────
+  axi_lite_sva #(.DATA_W(DATA_W),.ADDR_W(ADDR_W)) u_sva (
+    .clk(clk), .rst_n(rst_n),
+    .s_awaddr(s_awaddr), .s_awvalid(s_awvalid), .s_awready(s_awready),
+    .s_wdata(s_wdata),   .s_wstrb(s_wstrb),
+    .s_wvalid(s_wvalid), .s_wready(s_wready),
+    .s_bresp(s_bresp),   .s_bvalid(s_bvalid),   .s_bready(s_bready),
+    .s_araddr(s_araddr), .s_arvalid(s_arvalid), .s_arready(s_arready),
+    .s_rdata(s_rdata),   .s_rresp(s_rresp),
+    .s_rvalid(s_rvalid), .s_rready(s_rready)
+  );
+
+  // ── Coverage Monitor ──────────────────────────────────
+  axi_lite_coverage #(.DATA_W(DATA_W),.ADDR_W(ADDR_W)) u_cov (
+    .clk(clk), .rst_n(rst_n),
+    .s_awaddr(s_awaddr), .s_awvalid(s_awvalid), .s_awready(s_awready),
+    .s_wdata(s_wdata),   .s_wstrb(s_wstrb),
+    .s_wvalid(s_wvalid), .s_wready(s_wready),
+    .s_bresp(s_bresp),   .s_bvalid(s_bvalid),   .s_bready(s_bready),
+    .s_araddr(s_araddr), .s_arvalid(s_arvalid), .s_arready(s_arready),
+    .s_rdata(s_rdata),   .s_rresp(s_rresp),
+    .s_rvalid(s_rvalid), .s_rready(s_rready)
+  );
+
   // ──────────────────────────────────────────────
   // Clock
   // ──────────────────────────────────────────────
@@ -394,11 +418,40 @@ module axi_lite_tb;
     apply_reset();
     // Write full value first
     axi_write(4'h0, 32'hFFFF_FFFF, 4'hF, wr_resp);
-    // Write only lower byte (strobe = 4'b0001)
+    // byte0 only → lower byte changes, upper 3 stay FF
     axi_write(4'h0, 32'h0000_00AB, 4'h1, wr_resp);
     axi_read(4'h0, rd_data, rd_resp);
-    // Upper 3 bytes should still be FF, lower byte = AB
-    check_data("partial byte write", rd_data, 32'hFFFF_FFAB);
+    check_data("strobe byte0 only",  rd_data, 32'hFFFF_FFAB);
+
+    axi_write(4'h0, 32'hFFFF_FFFF, 4'hF, wr_resp);  // reset to all F
+    // byte1 only → bits[15:8] change
+    axi_write(4'h0, 32'h0000_CD00, 4'h2, wr_resp);
+    axi_read(4'h0, rd_data, rd_resp);
+    check_data("strobe byte1 only",  rd_data, 32'hFFFF_CDFF);
+
+    axi_write(4'h0, 32'hFFFF_FFFF, 4'hF, wr_resp);
+    // byte2 only → bits[23:16] change
+    axi_write(4'h0, 32'h00EF_0000, 4'h4, wr_resp);
+    axi_read(4'h0, rd_data, rd_resp);
+    check_data("strobe byte2 only",  rd_data, 32'hFFEF_FFFF);
+
+    axi_write(4'h0, 32'hFFFF_FFFF, 4'hF, wr_resp);
+    // byte3 only → bits[31:24] change
+    axi_write(4'h0, 32'h12000000, 4'h8, wr_resp);
+    axi_read(4'h0, rd_data, rd_resp);
+    check_data("strobe byte3 only",  rd_data, 32'h12FF_FFFF);
+
+    axi_write(4'h0, 32'hFFFF_FFFF, 4'hF, wr_resp);
+    // low half (bytes 1:0) → bits[15:0] change
+    axi_write(4'h0, 32'h0000_1234, 4'h3, wr_resp);
+    axi_read(4'h0, rd_data, rd_resp);
+    check_data("strobe low half",    rd_data, 32'hFFFF_1234);
+
+    axi_write(4'h0, 32'hFFFF_FFFF, 4'hF, wr_resp);
+    // high half (bytes 3:2) → bits[31:16] change
+    axi_write(4'h0, 32'h5678_0000, 4'hC, wr_resp);
+    axi_read(4'h0, rd_data, rd_resp);
+    check_data("strobe high half",   rd_data, 32'h5678_FFFF);
 
     // ─────────────────────────────
     // TEST 9: Back-to-back writes
@@ -411,18 +464,18 @@ module axi_lite_tb;
     check("B2B write 2 OKAY", wr_resp === RESP_OKAY);
     axi_write(4'h8, 32'h0000_0003, 4'hF, wr_resp);
     check("B2B write 3 OKAY", wr_resp === RESP_OKAY);
-    axi_read(4'h0, rd_data,  rd_resp); check_data("B2B REG0", rd_data,  32'h1);
-    axi_read(4'h4, rd_data,  rd_resp); check_data("B2B REG1", rd_data,  32'h2);
-    axi_read(4'h8, rd_data,  rd_resp); check_data("B2B REG2", rd_data,  32'h3);
+    axi_read(4'h0, rd_data, rd_resp); check_data("B2B REG0", rd_data, 32'h1);
+    axi_read(4'h4, rd_data, rd_resp); check_data("B2B REG1", rd_data, 32'h2);
+    axi_read(4'h8, rd_data, rd_resp); check_data("B2B REG2", rd_data, 32'h3);
 
     // ─────────────────────────────
     // TEST 10: Back-to-back reads
     // ─────────────────────────────
     $display("\n--- TEST 10: Back-to-Back Reads ---");
     // Registers still hold values from TEST 9
-    axi_read(4'h0, rd_data,  rd_resp); check_data("B2B rd REG0", rd_data, 32'h1);
-    axi_read(4'h4, rd_data,  rd_resp); check_data("B2B rd REG1", rd_data, 32'h2);
-    axi_read(4'h8, rd_data,  rd_resp); check_data("B2B rd REG2", rd_data, 32'h3);
+    axi_read(4'h0, rd_data, rd_resp); check_data("B2B rd REG0", rd_data, 32'h1);
+    axi_read(4'h4, rd_data, rd_resp); check_data("B2B rd REG1", rd_data, 32'h2);
+    axi_read(4'h8, rd_data, rd_resp); check_data("B2B rd REG2", rd_data, 32'h3);
 
     // ─────────────────────────────
     // TEST 11: Write then immediate read
@@ -443,14 +496,13 @@ module axi_lite_tb;
     shadow_regs[2] = 0;
 
     for (i = 0; i < 20; i = i + 1) begin
-      rand_addr = ($random % 3) * 4;   // 0x0, 0x4, or 0x8 only
+      // $unsigned prevents negative modulo wrapping to 0xC (REG3)
+      rand_addr = ($unsigned($random) % 3) * 4;  // 0x0, 0x4, or 0x8 only
       rand_data = $random;
 
-      // Write
       axi_write(rand_addr[ADDR_W-1:0], rand_data, 4'hF, wr_resp);
       shadow_regs[rand_addr/4] = rand_data;
 
-      // Read back immediately
       axi_read(rand_addr[ADDR_W-1:0], rd_data, rd_resp);
 
       if (rd_data === shadow_regs[rand_addr/4]) begin
@@ -462,6 +514,100 @@ module axi_lite_tb;
       end
     end
     $display("  [INFO] 20 random write/read pairs completed");
+
+    // ─────────────────────────────
+    // TEST 13: Back-pressure
+    // Delay s_bready and s_rready AFTER the write/read
+    // address+data handshakes complete, exercising the
+    // slave's VALID hold behavior on B and R channels.
+    // This DUT's AW/W/AR accept in one cycle (ready pulses
+    // once), so we use axi_write/axi_read then separately
+    // drive a delayed-ready sequence on B and R only.
+    // ─────────────────────────────
+    $display("\n--- TEST 13: Back-Pressure (Delayed B/R READY) ---");
+    apply_reset();
+
+    // Write REG1 with normal task first (gets BVALID asserted)
+    // Then verify BVALID holds by checking it 2 cycles later
+    @(posedge clk); #1;
+    s_awaddr  = 4'h4;
+    s_awvalid = 1;
+    s_wdata   = 32'hCAFE_F00D;
+    s_wstrb   = 4'hF;
+    s_wvalid  = 1;
+    s_bready  = 0;    // hold low — slave must keep BVALID high
+
+    // Wait for AW handshake then drop AWVALID
+    @(posedge clk);
+    if (s_awready) begin #1; s_awvalid = 0; end
+    else begin
+      @(posedge clk); #1;
+      if (s_awready) s_awvalid = 0;
+    end
+
+    // Wait for W handshake then drop WVALID
+    if (s_wready) begin #1; s_wvalid = 0; end
+    else begin
+      @(posedge clk); #1;
+      if (s_wready) s_wvalid = 0;
+    end
+
+    // Slave will now assert BVALID — wait for it
+    begin : wait_bvalid
+      integer t; t = 0;
+      while (!s_bvalid && t < 10) begin
+        @(posedge clk); t = t + 1;
+      end
+    end
+
+    // BVALID is high — hold BREADY low for 3 more cycles (back-pressure)
+    repeat(3) @(posedge clk);
+    check("BVALID held during back-pressure", s_bvalid === 1'b1);
+
+    // Now accept
+    #1; s_bready = 1;
+    @(posedge clk); #1;
+    check("BP write OKAY resp", s_bresp === RESP_OKAY);
+    s_bready = 0;
+    @(posedge clk);
+
+    // Verify the write
+    axi_read(4'h4, rd_data, rd_resp);
+    check_data("BP write readback", rd_data, 32'hCAFE_F00D);
+
+    // Read REG1 — hold RREADY low after AR handshake
+    @(posedge clk); #1;
+    s_araddr  = 4'h4;
+    s_arvalid = 1;
+    s_rready  = 0;    // hold low
+
+    // Wait for AR handshake
+    @(posedge clk);
+    if (s_arready) begin #1; s_arvalid = 0; end
+    else begin
+      @(posedge clk); #1;
+      if (s_arready) s_arvalid = 0;
+    end
+
+    // Slave will assert RVALID — wait for it
+    begin : wait_rvalid
+      integer t; t = 0;
+      while (!s_rvalid && t < 10) begin
+        @(posedge clk); t = t + 1;
+      end
+    end
+
+    // RVALID is high — hold RREADY low for 3 more cycles
+    repeat(3) @(posedge clk);
+    check("RVALID held during back-pressure", s_rvalid === 1'b1);
+
+    // Now accept
+    #1; s_rready = 1;
+    @(posedge clk); #1;
+    check_data("BP read data",   s_rdata, 32'hCAFE_F00D);
+    check("BP read OKAY resp",   s_rresp === RESP_OKAY);
+    s_rready = 0;
+    @(posedge clk);
 
     // ─────────────────────────────
     // Final report
@@ -476,6 +622,7 @@ module axi_lite_tb;
       $display("  ** %0d TEST(S) FAILED **", fail_count);
     $display("========================================\n");
 
+    u_cov.print_coverage();
     $finish;
   end
 
@@ -485,6 +632,7 @@ module axi_lite_tb;
   initial begin
     #500_000;
     $display("[TIMEOUT] Simulation exceeded limit!");
+    u_cov.print_coverage();
     $finish;
   end
 
