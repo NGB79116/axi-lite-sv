@@ -1,0 +1,8 @@
+# Build and simulation outputs
+axi_sim
+*.vcd
+*.log
+
+# Local notes and waveform views
+AUDIT.md
+*.gtkw

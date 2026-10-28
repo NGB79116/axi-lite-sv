@@ -1,8 +1,19 @@
 // ============================================================
 // Module  : axi_lite_sva
-// Purpose : Protocol assertion monitor for axi_lite_slave
-//           Written for Icarus Verilog (iverilog) compatibility.
-//           No SVA property/assert property — uses always blocks.
+// Purpose : Procedural protocol monitor for axi_lite_slave.
+//           Despite the file/module name this is NOT SVA:
+//           there are no assert/property/sequence constructs.
+//           Every rule is a plain always block that prints
+//           [MON FAIL] and counts, so it runs on Icarus 12.
+//
+//           For each rule the final report prints:
+//             Evaluated - edges on which the rule actually
+//                         constrained the bus (defined per
+//                         rule below)
+//             Failed    - edges on which it was violated
+//           Every counter is driven by exactly one process
+//           (initialised in its declaration, incremented in
+//           one always block), so stricter simulators accept it.
 //
 // Instantiate in axi_lite_tb.sv after the DUT:
 //
@@ -45,61 +56,103 @@ module axi_lite_sva #(
   input logic                  s_rready
 );
 
-  integer sva_fail_count;
-  integer sva_pass_count;
+  // ──────────────────────────────────────────────────────
+  // Per-rule counters: n_* = evaluated, f_* = failed
+  // ──────────────────────────────────────────────────────
+  integer n_awvalid_hold = 0, f_awvalid_hold = 0;
+  integer n_wvalid_hold  = 0, f_wvalid_hold  = 0;
+  integer n_arvalid_hold = 0, f_arvalid_hold = 0;
+  integer n_bvalid_hold  = 0, f_bvalid_hold  = 0;
+  integer n_rvalid_hold  = 0, f_rvalid_hold  = 0;
+  integer n_awaddr_stab  = 0, f_awaddr_stab  = 0;
+  integer n_araddr_stab  = 0, f_araddr_stab  = 0;
+  integer n_wdata_stab   = 0, f_wdata_stab   = 0;
+  integer n_wstrb_stab   = 0, f_wstrb_stab   = 0;
+  integer n_reset_outs   = 0, f_reset_outs   = 0;
+  integer n_bresp_legal  = 0, f_bresp_legal  = 0;
+  integer n_rresp_legal  = 0, f_rresp_legal  = 0;
+  integer n_wr_rw_okay   = 0, f_wr_rw_okay   = 0;
+  integer n_wr_reg3_err  = 0, f_wr_reg3_err  = 0;
+  integer n_rd_reg3_id   = 0, f_rd_reg3_id   = 0;
+  integer n_bvalid_order = 0, f_bvalid_order = 0;
+  integer n_rvalid_order = 0, f_rvalid_order = 0;
+  integer n_rdata_stab   = 0, f_rdata_stab   = 0;
+  integer n_rresp_stab   = 0, f_rresp_stab   = 0;
+  integer n_bresp_stab   = 0, f_bresp_stab   = 0;
+  integer info_wstrb_zero = 0;   // not a rule, see SECTION 7
 
-  initial begin
-    sva_fail_count = 0;
-    sva_pass_count = 0;
-  end
+  // Total failures; read by the testbench's final verdict
+  wire [31:0] sva_fail_count =
+      f_awvalid_hold + f_wvalid_hold + f_arvalid_hold +
+      f_bvalid_hold  + f_rvalid_hold +
+      f_awaddr_stab  + f_araddr_stab + f_wdata_stab + f_wstrb_stab +
+      f_reset_outs   +
+      f_bresp_legal  + f_rresp_legal +
+      f_wr_rw_okay   + f_wr_reg3_err + f_rd_reg3_id +
+      f_bvalid_order + f_rvalid_order +
+      f_rdata_stab   + f_rresp_stab  + f_bresp_stab;
 
   // ──────────────────────────────────────────────────────
   // Sticky VALID trackers
-  // Once VALID goes high it must stay high until READY.
+  // *_saw = 1 after an edge where VALID was high and no
+  // handshake happened, i.e. a transfer is pending.
   // ──────────────────────────────────────────────────────
-  logic aw_valid_saw;   // AWVALID was seen high
-  logic w_valid_saw;    // WVALID  was seen high
-  logic ar_valid_saw;   // ARVALID was seen high
+  logic aw_valid_saw;   // AWVALID pending
+  logic w_valid_saw;    // WVALID  pending
+  logic ar_valid_saw;   // ARVALID pending
+  logic bvalid_saw;     // BVALID  pending
+  logic rvalid_saw;     // RVALID  pending
 
-  always_ff @(posedge clk or negedge rst_n) begin
+  always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       aw_valid_saw <= 1'b0;
       w_valid_saw  <= 1'b0;
       ar_valid_saw <= 1'b0;
+      bvalid_saw   <= 1'b0;
+      rvalid_saw   <= 1'b0;
     end else begin
-      // Set sticky when VALID rises
-      if (s_awvalid) aw_valid_saw <= 1'b1;
-      if (s_wvalid)  w_valid_saw  <= 1'b1;
-      if (s_arvalid) ar_valid_saw <= 1'b1;
-      // Clear sticky on handshake
-      if (s_awvalid && s_awready) aw_valid_saw <= 1'b0;
-      if (s_wvalid  && s_wready)  w_valid_saw  <= 1'b0;
-      if (s_arvalid && s_arready) ar_valid_saw <= 1'b0;
+      // Set while VALID is high, clear on handshake
+      aw_valid_saw <= s_awvalid && !s_awready;
+      w_valid_saw  <= s_wvalid  && !s_wready;
+      ar_valid_saw <= s_arvalid && !s_arready;
+      bvalid_saw   <= s_bvalid  && !s_bready;
+      rvalid_saw   <= s_rvalid  && !s_rready;
     end
   end
 
   // ──────────────────────────────────────────────────────
-  // SECTION 1 — VALID Stability
+  // SECTION 1 — Master VALID Stability
+  // Once AWVALID/WVALID/ARVALID is high it must stay high
+  // until the handshake. Evaluated on every edge where a
+  // transfer was pending; fails if VALID is now low, no
+  // matter what READY is (READY without VALID is not a
+  // handshake).
   // ──────────────────────────────────────────────────────
-  always_ff @(posedge clk) begin
+  always @(posedge clk) begin
     if (rst_n) begin
 
-      // AWVALID must not drop before AWREADY
-      if (aw_valid_saw && !s_awvalid && !s_awready) begin
-        $display("[SVA FAIL] AWVALID dropped before AWREADY at time %0t", $time);
-        sva_fail_count = sva_fail_count + 1;
+      if (aw_valid_saw) begin
+        n_awvalid_hold <= n_awvalid_hold + 1;
+        if (!s_awvalid) begin
+          $display("[MON FAIL] AWVALID dropped before handshake at %0t", $time);
+          f_awvalid_hold <= f_awvalid_hold + 1;
+        end
       end
 
-      // WVALID must not drop before WREADY
-      if (w_valid_saw && !s_wvalid && !s_wready) begin
-        $display("[SVA FAIL] WVALID dropped before WREADY at time %0t", $time);
-        sva_fail_count = sva_fail_count + 1;
+      if (w_valid_saw) begin
+        n_wvalid_hold <= n_wvalid_hold + 1;
+        if (!s_wvalid) begin
+          $display("[MON FAIL] WVALID dropped before handshake at %0t", $time);
+          f_wvalid_hold <= f_wvalid_hold + 1;
+        end
       end
 
-      // ARVALID must not drop before ARREADY
-      if (ar_valid_saw && !s_arvalid && !s_arready) begin
-        $display("[SVA FAIL] ARVALID dropped before ARREADY at time %0t", $time);
-        sva_fail_count = sva_fail_count + 1;
+      if (ar_valid_saw) begin
+        n_arvalid_hold <= n_arvalid_hold + 1;
+        if (!s_arvalid) begin
+          $display("[MON FAIL] ARVALID dropped before handshake at %0t", $time);
+          f_arvalid_hold <= f_arvalid_hold + 1;
+        end
       end
 
     end
@@ -107,86 +160,88 @@ module axi_lite_sva #(
 
   // ──────────────────────────────────────────────────────
   // SECTION 2 — Slave VALID Stability
-  // BVALID and RVALID must hold until master accepts.
+  // BVALID and RVALID must hold until the master accepts.
+  // Same evaluation as SECTION 1.
   // ──────────────────────────────────────────────────────
-  logic bvalid_saw;
-  logic rvalid_saw;
-
-  always_ff @(posedge clk or negedge rst_n) begin
-    if (!rst_n) begin
-      bvalid_saw <= 1'b0;
-      rvalid_saw <= 1'b0;
-    end else begin
-      if (s_bvalid) bvalid_saw <= 1'b1;
-      if (s_rvalid) rvalid_saw <= 1'b1;
-      if (s_bvalid && s_bready) bvalid_saw <= 1'b0;
-      if (s_rvalid && s_rready) rvalid_saw <= 1'b0;
-    end
-  end
-
-  always_ff @(posedge clk) begin
+  always @(posedge clk) begin
     if (rst_n) begin
 
-      // BVALID must not drop before BREADY
-      if (bvalid_saw && !s_bvalid && !s_bready) begin
-        $display("[SVA FAIL] BVALID dropped before BREADY at time %0t", $time);
-        sva_fail_count = sva_fail_count + 1;
+      if (bvalid_saw) begin
+        n_bvalid_hold <= n_bvalid_hold + 1;
+        if (!s_bvalid) begin
+          $display("[MON FAIL] BVALID dropped before handshake at %0t", $time);
+          f_bvalid_hold <= f_bvalid_hold + 1;
+        end
       end
 
-      // RVALID must not drop before RREADY
-      if (rvalid_saw && !s_rvalid && !s_rready) begin
-        $display("[SVA FAIL] RVALID dropped before RREADY at time %0t", $time);
-        sva_fail_count = sva_fail_count + 1;
+      if (rvalid_saw) begin
+        n_rvalid_hold <= n_rvalid_hold + 1;
+        if (!s_rvalid) begin
+          $display("[MON FAIL] RVALID dropped before handshake at %0t", $time);
+          f_rvalid_hold <= f_rvalid_hold + 1;
+        end
       end
 
     end
   end
 
   // ──────────────────────────────────────────────────────
-  // SECTION 3 — Address & Data Stability
-  // Must not change while VALID is high, READY not yet seen.
+  // SECTION 3 — Master Payload Stability
+  // While a transfer is pending, AWADDR/ARADDR/WDATA/WSTRB
+  // must equal last edge's value, up to and including the
+  // handshake edge. Evaluated on edges where the transfer
+  // was pending and VALID is still high (a VALID drop is
+  // SECTION 1's failure).
   // ──────────────────────────────────────────────────────
   logic [ADDR_W-1:0]   prev_awaddr;
   logic [ADDR_W-1:0]   prev_araddr;
   logic [DATA_W-1:0]   prev_wdata;
   logic [DATA_W/8-1:0] prev_wstrb;
 
-  always_ff @(posedge clk) begin
+  always @(posedge clk) begin
     prev_awaddr <= s_awaddr;
     prev_araddr <= s_araddr;
     prev_wdata  <= s_wdata;
     prev_wstrb  <= s_wstrb;
   end
 
-  always_ff @(posedge clk) begin
+  always @(posedge clk) begin
     if (rst_n) begin
 
-      // AWADDR must be stable while AWVALID=1, AWREADY=0
-      if (aw_valid_saw && s_awvalid && !s_awready &&
-          prev_awaddr !== s_awaddr) begin
-        $display("[SVA FAIL] AWADDR changed while AWVALID=1, AWREADY=0 at %0t", $time);
-        sva_fail_count = sva_fail_count + 1;
+      if (aw_valid_saw && s_awvalid) begin
+        n_awaddr_stab <= n_awaddr_stab + 1;
+        if (prev_awaddr !== s_awaddr) begin
+          $display("[MON FAIL] AWADDR changed while AW pending: 0x%h -> 0x%h at %0t",
+                   prev_awaddr, s_awaddr, $time);
+          f_awaddr_stab <= f_awaddr_stab + 1;
+        end
       end
 
-      // ARADDR must be stable while ARVALID=1, ARREADY=0
-      if (ar_valid_saw && s_arvalid && !s_arready &&
-          prev_araddr !== s_araddr) begin
-        $display("[SVA FAIL] ARADDR changed while ARVALID=1, ARREADY=0 at %0t", $time);
-        sva_fail_count = sva_fail_count + 1;
+      if (ar_valid_saw && s_arvalid) begin
+        n_araddr_stab <= n_araddr_stab + 1;
+        if (prev_araddr !== s_araddr) begin
+          $display("[MON FAIL] ARADDR changed while AR pending: 0x%h -> 0x%h at %0t",
+                   prev_araddr, s_araddr, $time);
+          f_araddr_stab <= f_araddr_stab + 1;
+        end
       end
 
-      // WDATA must be stable while WVALID=1, WREADY=0
-      if (w_valid_saw && s_wvalid && !s_wready &&
-          prev_wdata !== s_wdata) begin
-        $display("[SVA FAIL] WDATA changed while WVALID=1, WREADY=0 at %0t", $time);
-        sva_fail_count = sva_fail_count + 1;
+      if (w_valid_saw && s_wvalid) begin
+        n_wdata_stab <= n_wdata_stab + 1;
+        if (prev_wdata !== s_wdata) begin
+          $display("[MON FAIL] WDATA changed while W pending: 0x%08h -> 0x%08h at %0t",
+                   prev_wdata, s_wdata, $time);
+          f_wdata_stab <= f_wdata_stab + 1;
+        end
       end
 
-      // WSTRB must be stable while WVALID=1, WREADY=0
-      if (w_valid_saw && s_wvalid && !s_wready &&
-          prev_wstrb !== s_wstrb) begin
-        $display("[SVA FAIL] WSTRB changed while WVALID=1, WREADY=0 at %0t", $time);
-        sva_fail_count = sva_fail_count + 1;
+      if (w_valid_saw && s_wvalid) begin
+        n_wstrb_stab <= n_wstrb_stab + 1;
+        if (prev_wstrb !== s_wstrb) begin
+          $display("[MON FAIL] WSTRB changed while W pending: 4'b%b -> 4'b%b at %0t",
+                   prev_wstrb, s_wstrb, $time);
+          f_wstrb_stab <= f_wstrb_stab + 1;
+        end
       end
 
     end
@@ -194,51 +249,49 @@ module axi_lite_sva #(
 
   // ──────────────────────────────────────────────────────
   // SECTION 4 — Reset Behavior
-  // All slave outputs must be deasserted cycle after reset.
+  // On the first edge after rst_n is released, BVALID,
+  // RVALID, AWREADY, WREADY and ARREADY must all be low.
+  // Evaluated once per reset release.
   // ──────────────────────────────────────────────────────
   logic rst_n_prev;
 
-  always_ff @(posedge clk) begin
+  always @(posedge clk) begin
     rst_n_prev <= rst_n;
   end
 
-  always_ff @(posedge clk) begin
+  always @(posedge clk) begin
     if (rst_n && !rst_n_prev) begin
-      // One cycle after reset deasserted
-      if (s_bvalid) begin
-        $display("[SVA FAIL] s_bvalid not 0 after reset at time %0t", $time);
-        sva_fail_count = sva_fail_count + 1;
-      end
-      if (s_rvalid) begin
-        $display("[SVA FAIL] s_rvalid not 0 after reset at time %0t", $time);
-        sva_fail_count = sva_fail_count + 1;
-      end
-      if (s_awready) begin
-        $display("[SVA FAIL] s_awready not 0 after reset at time %0t", $time);
-        sva_fail_count = sva_fail_count + 1;
-      end
-      if (s_arready) begin
-        $display("[SVA FAIL] s_arready not 0 after reset at time %0t", $time);
-        sva_fail_count = sva_fail_count + 1;
+      n_reset_outs <= n_reset_outs + 1;
+      if (s_bvalid || s_rvalid || s_awready || s_wready || s_arready) begin
+        $display("[MON FAIL] Outputs not idle after reset (BVALID=%b RVALID=%b AWREADY=%b WREADY=%b ARREADY=%b) at %0t",
+                 s_bvalid, s_rvalid, s_awready, s_wready, s_arready, $time);
+        f_reset_outs <= f_reset_outs + 1;
       end
     end
   end
 
   // ──────────────────────────────────────────────────────
   // SECTION 5 — Response Code Legality
-  // Only OKAY (2'b00) and SLVERR (2'b10) are valid.
+  // This slave may only return OKAY (2'b00) or SLVERR
+  // (2'b10). Evaluated on every edge VALID is high.
   // ──────────────────────────────────────────────────────
-  always_ff @(posedge clk) begin
+  always @(posedge clk) begin
     if (rst_n) begin
 
-      if (s_bvalid && s_bresp !== 2'b00 && s_bresp !== 2'b10) begin
-        $display("[SVA FAIL] Illegal BRESP=2'b%b at time %0t", s_bresp, $time);
-        sva_fail_count = sva_fail_count + 1;
+      if (s_bvalid) begin
+        n_bresp_legal <= n_bresp_legal + 1;
+        if (s_bresp !== 2'b00 && s_bresp !== 2'b10) begin
+          $display("[MON FAIL] Illegal BRESP=2'b%b at %0t", s_bresp, $time);
+          f_bresp_legal <= f_bresp_legal + 1;
+        end
       end
 
-      if (s_rvalid && s_rresp !== 2'b00 && s_rresp !== 2'b10) begin
-        $display("[SVA FAIL] Illegal RRESP=2'b%b at time %0t", s_rresp, $time);
-        sva_fail_count = sva_fail_count + 1;
+      if (s_rvalid) begin
+        n_rresp_legal <= n_rresp_legal + 1;
+        if (s_rresp !== 2'b00 && s_rresp !== 2'b10) begin
+          $display("[MON FAIL] Illegal RRESP=2'b%b at %0t", s_rresp, $time);
+          f_rresp_legal <= f_rresp_legal + 1;
+        end
       end
 
     end
@@ -246,17 +299,16 @@ module axi_lite_sva #(
 
   // ──────────────────────────────────────────────────────
   // SECTION 6 — Register-specific Response Rules
-  // Checks response within a window after address handshake.
-  // Uses a simple shift-register delay to observe B/R channel.
+  // The address is latched at the AW/AR handshake; the
+  // rule is evaluated once per transaction, at the B/R
+  // handshake, and only for the addresses it covers.
   // ──────────────────────────────────────────────────────
-
-  // Latch address at handshake moment
   logic [ADDR_W-1:0] chk_waddr;
   logic [ADDR_W-1:0] chk_raddr;
   logic chk_w_pending;
   logic chk_r_pending;
 
-  always_ff @(posedge clk or negedge rst_n) begin
+  always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       chk_waddr     <= '0;
       chk_raddr     <= '0;
@@ -276,77 +328,73 @@ module axi_lite_sva #(
     end
   end
 
-  always_ff @(posedge clk) begin
-    if (rst_n && s_bvalid && chk_w_pending) begin
+  always @(posedge clk) begin
+    if (rst_n && s_bvalid && s_bready && chk_w_pending) begin
 
-      // Valid R/W registers must return OKAY
-      if ((chk_waddr == 4'h0 || chk_waddr == 4'h4 || chk_waddr == 4'h8) &&
-           s_bresp !== 2'b00) begin
-        $display("[SVA FAIL] Write to valid reg 0x%h returned BRESP=2'b%b (expected OKAY) at %0t",
-                 chk_waddr, s_bresp, $time);
-        sva_fail_count = sva_fail_count + 1;
-      end else begin
-        sva_pass_count = sva_pass_count + 1;
+      // Write to a R/W register must return OKAY
+      if (chk_waddr == 4'h0 || chk_waddr == 4'h4 || chk_waddr == 4'h8) begin
+        n_wr_rw_okay <= n_wr_rw_okay + 1;
+        if (s_bresp !== 2'b00) begin
+          $display("[MON FAIL] Write to R/W reg 0x%h returned BRESP=2'b%b (expected OKAY) at %0t",
+                   chk_waddr, s_bresp, $time);
+          f_wr_rw_okay <= f_wr_rw_okay + 1;
+        end
       end
 
-      // REG3 write must return SLVERR
-      if (chk_waddr == 4'hC && s_bresp !== 2'b10) begin
-        $display("[SVA FAIL] Write to REG3 (R/O) returned BRESP=2'b%b (expected SLVERR) at %0t",
-                 s_bresp, $time);
-        sva_fail_count = sva_fail_count + 1;
-      end else if (chk_waddr == 4'hC) begin
-        sva_pass_count = sva_pass_count + 1;
-      end
-
-    end
-  end
-
-  always_ff @(posedge clk) begin
-    if (rst_n && s_rvalid && chk_r_pending) begin
-
-      // REG3 read must return OKAY
-      if (chk_raddr == 4'hC && s_rresp !== 2'b00) begin
-        $display("[SVA FAIL] Read from REG3 returned RRESP=2'b%b (expected OKAY) at %0t",
-                 s_rresp, $time);
-        sva_fail_count = sva_fail_count + 1;
-      end
-
-      // REG3 read must return DEADBEEF
-      if (chk_raddr == 4'hC && s_rdata !== 32'hDEAD_BEEF) begin
-        $display("[SVA FAIL] REG3 returned 0x%08h (expected 0xDEAD_BEEF) at %0t",
-                 s_rdata, $time);
-        sva_fail_count = sva_fail_count + 1;
-      end else if (chk_raddr == 4'hC) begin
-        sva_pass_count = sva_pass_count + 1;
+      // Write to REG3 (read-only) must return SLVERR
+      if (chk_waddr == 4'hC) begin
+        n_wr_reg3_err <= n_wr_reg3_err + 1;
+        if (s_bresp !== 2'b10) begin
+          $display("[MON FAIL] Write to REG3 (R/O) returned BRESP=2'b%b (expected SLVERR) at %0t",
+                   s_bresp, $time);
+          f_wr_reg3_err <= f_wr_reg3_err + 1;
+        end
       end
 
     end
   end
 
+  always @(posedge clk) begin
+    if (rst_n && s_rvalid && s_rready && chk_r_pending && chk_raddr == 4'hC) begin
+      // Read of REG3 must return OKAY and 0xDEAD_BEEF
+      n_rd_reg3_id <= n_rd_reg3_id + 1;
+      if (s_rresp !== 2'b00 || s_rdata !== 32'hDEAD_BEEF) begin
+        $display("[MON FAIL] REG3 read returned 0x%08h RRESP=2'b%b (expected 0xDEADBEEF, OKAY) at %0t",
+                 s_rdata, s_rresp, $time);
+        f_rd_reg3_id <= f_rd_reg3_id + 1;
+      end
+    end
+  end
+
   // ──────────────────────────────────────────────────────
-  // SECTION 7 — WSTRB Safety
-  // WSTRB must not be all-zero when WVALID is high.
+  // SECTION 7 — WSTRB = 0 (information only)
+  // AXI allows WVALID with WSTRB = 0: the write completes
+  // with a normal response and no byte is updated. It is
+  // therefore not a protocol violation. It is unusual, so
+  // each such W handshake is reported as [MON INFO] and
+  // counted, but never fails the run.
   // ──────────────────────────────────────────────────────
-  always_ff @(posedge clk) begin
-    if (rst_n && s_wvalid && s_wstrb === 4'b0000) begin
-      $display("[SVA FAIL] WVALID=1 but WSTRB=0 at time %0t", $time);
-      sva_fail_count = sva_fail_count + 1;
+  always @(posedge clk) begin
+    if (rst_n && s_wvalid && s_wready && s_wstrb === '0) begin
+      $display("[MON INFO] W handshake with WSTRB=0 (legal, no bytes written) at %0t", $time);
+      info_wstrb_zero <= info_wstrb_zero + 1;
     end
   end
 
   // ──────────────────────────────────────────────────────
   // SECTION 8 — Protocol Ordering
-  // BVALID must not appear without prior AW+W handshakes.
-  // RVALID must not appear without prior AR handshake.
+  // BVALID must not rise before the AW and W handshakes;
+  // RVALID must not rise before the AR handshake.
+  // Evaluated on each rising edge of BVALID / RVALID.
   // ──────────────────────────────────────────────────────
   logic aw_done, w_done, ar_done;
   logic bvalid_prev, rvalid_prev;
 
-  always_ff @(posedge clk or negedge rst_n) begin
+  always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-      aw_done    <= 1'b0;
-      w_done     <= 1'b0;
-      ar_done    <= 1'b0;
+      aw_done     <= 1'b0;
+      w_done      <= 1'b0;
+      ar_done     <= 1'b0;
       bvalid_prev <= 1'b0;
       rvalid_prev <= 1'b0;
     end else begin
@@ -364,18 +412,25 @@ module axi_lite_sva #(
     end
   end
 
-  always_ff @(posedge clk) begin
+  always @(posedge clk) begin
     if (rst_n) begin
-      // BVALID just rose
-      if (s_bvalid && !bvalid_prev && !(aw_done && w_done)) begin
-        $display("[SVA FAIL] BVALID rose without completed AW+W handshakes at %0t", $time);
-        sva_fail_count = sva_fail_count + 1;
+
+      if (s_bvalid && !bvalid_prev) begin
+        n_bvalid_order <= n_bvalid_order + 1;
+        if (!(aw_done && w_done)) begin
+          $display("[MON FAIL] BVALID rose without completed AW+W handshakes at %0t", $time);
+          f_bvalid_order <= f_bvalid_order + 1;
+        end
       end
-      // RVALID just rose
-      if (s_rvalid && !rvalid_prev && !ar_done) begin
-        $display("[SVA FAIL] RVALID rose without prior AR handshake at %0t", $time);
-        sva_fail_count = sva_fail_count + 1;
+
+      if (s_rvalid && !rvalid_prev) begin
+        n_rvalid_order <= n_rvalid_order + 1;
+        if (!ar_done) begin
+          $display("[MON FAIL] RVALID rose without prior AR handshake at %0t", $time);
+          f_rvalid_order <= f_rvalid_order + 1;
+        end
       end
+
     end
   end
 
@@ -383,63 +438,89 @@ module axi_lite_sva #(
   // SECTION 9 — Slave Payload Stability
   // RDATA/RRESP must hold while RVALID=1, RREADY=0.
   // BRESP must hold while BVALID=1, BREADY=0.
+  // Evaluated on edges where the response was waiting on
+  // the previous edge and VALID is still high.
   // ──────────────────────────────────────────────────────
   logic [DATA_W-1:0] prev_rdata;
   logic [1:0]        prev_rresp;
   logic [1:0]        prev_bresp;
-  logic              r_wait_prev;   // last cycle: RVALID=1, RREADY=0
-  logic              b_wait_prev;   // last cycle: BVALID=1, BREADY=0
 
-  always_ff @(posedge clk) begin
-    prev_rdata  <= s_rdata;
-    prev_rresp  <= s_rresp;
-    prev_bresp  <= s_bresp;
-    r_wait_prev <= rst_n && s_rvalid && !s_rready;
-    b_wait_prev <= rst_n && s_bvalid && !s_bready;
+  always @(posedge clk) begin
+    prev_rdata <= s_rdata;
+    prev_rresp <= s_rresp;
+    prev_bresp <= s_bresp;
   end
 
-  always_ff @(posedge clk) begin
+  always @(posedge clk) begin
     if (rst_n) begin
 
-      // RDATA must be stable while RVALID=1, RREADY=0
-      if (r_wait_prev && s_rvalid && prev_rdata !== s_rdata) begin
-        $display("[SVA FAIL] RDATA changed while RVALID=1, RREADY=0: 0x%08h -> 0x%08h at %0t",
-                 prev_rdata, s_rdata, $time);
-        sva_fail_count = sva_fail_count + 1;
+      if (rvalid_saw && s_rvalid) begin
+        n_rdata_stab <= n_rdata_stab + 1;
+        if (prev_rdata !== s_rdata) begin
+          $display("[MON FAIL] RDATA changed while RVALID=1, RREADY=0: 0x%08h -> 0x%08h at %0t",
+                   prev_rdata, s_rdata, $time);
+          f_rdata_stab <= f_rdata_stab + 1;
+        end
       end
 
-      // RRESP must be stable while RVALID=1, RREADY=0
-      if (r_wait_prev && s_rvalid && prev_rresp !== s_rresp) begin
-        $display("[SVA FAIL] RRESP changed while RVALID=1, RREADY=0: 2'b%b -> 2'b%b at %0t",
-                 prev_rresp, s_rresp, $time);
-        sva_fail_count = sva_fail_count + 1;
+      if (rvalid_saw && s_rvalid) begin
+        n_rresp_stab <= n_rresp_stab + 1;
+        if (prev_rresp !== s_rresp) begin
+          $display("[MON FAIL] RRESP changed while RVALID=1, RREADY=0: 2'b%b -> 2'b%b at %0t",
+                   prev_rresp, s_rresp, $time);
+          f_rresp_stab <= f_rresp_stab + 1;
+        end
       end
 
-      // BRESP must be stable while BVALID=1, BREADY=0
-      if (b_wait_prev && s_bvalid && prev_bresp !== s_bresp) begin
-        $display("[SVA FAIL] BRESP changed while BVALID=1, BREADY=0: 2'b%b -> 2'b%b at %0t",
-                 prev_bresp, s_bresp, $time);
-        sva_fail_count = sva_fail_count + 1;
+      if (bvalid_saw && s_bvalid) begin
+        n_bresp_stab <= n_bresp_stab + 1;
+        if (prev_bresp !== s_bresp) begin
+          $display("[MON FAIL] BRESP changed while BVALID=1, BREADY=0: 2'b%b -> 2'b%b at %0t",
+                   prev_bresp, s_bresp, $time);
+          f_bresp_stab <= f_bresp_stab + 1;
+        end
       end
 
     end
   end
 
   // ──────────────────────────────────────────────────────
-  // Final SVA report — call from tb with $finish trigger
-  // or just let it print at simulation end via $finish
+  // Final report — printed automatically at $finish
   // ──────────────────────────────────────────────────────
+  // One row per rule: evaluated, failed, rule name
   final begin
     $display("");
     $display("========================================");
-    $display("  SVA Monitor Report");
+    $display("  Protocol Monitor Report");
     $display("========================================");
-    $display("  Assertion checks passed : %0d", sva_pass_count);
-    $display("  Assertion checks FAILED : %0d", sva_fail_count);
+    $display("  Evaluated  Failed   Rule");
+    $display("  %9d %7d   %s", n_awvalid_hold, f_awvalid_hold, "S1 AWVALID held until handshake");
+    $display("  %9d %7d   %s", n_wvalid_hold, f_wvalid_hold, "S1 WVALID held until handshake");
+    $display("  %9d %7d   %s", n_arvalid_hold, f_arvalid_hold, "S1 ARVALID held until handshake");
+    $display("  %9d %7d   %s", n_bvalid_hold, f_bvalid_hold, "S2 BVALID held until handshake");
+    $display("  %9d %7d   %s", n_rvalid_hold, f_rvalid_hold, "S2 RVALID held until handshake");
+    $display("  %9d %7d   %s", n_awaddr_stab, f_awaddr_stab, "S3 AWADDR stable while pending");
+    $display("  %9d %7d   %s", n_araddr_stab, f_araddr_stab, "S3 ARADDR stable while pending");
+    $display("  %9d %7d   %s", n_wdata_stab, f_wdata_stab, "S3 WDATA stable while pending");
+    $display("  %9d %7d   %s", n_wstrb_stab, f_wstrb_stab, "S3 WSTRB stable while pending");
+    $display("  %9d %7d   %s", n_reset_outs, f_reset_outs, "S4 outputs idle after reset");
+    $display("  %9d %7d   %s", n_bresp_legal, f_bresp_legal, "S5 BRESP is OKAY or SLVERR");
+    $display("  %9d %7d   %s", n_rresp_legal, f_rresp_legal, "S5 RRESP is OKAY or SLVERR");
+    $display("  %9d %7d   %s", n_wr_rw_okay, f_wr_rw_okay, "S6 R/W reg write returns OKAY");
+    $display("  %9d %7d   %s", n_wr_reg3_err, f_wr_reg3_err, "S6 REG3 write returns SLVERR");
+    $display("  %9d %7d   %s", n_rd_reg3_id, f_rd_reg3_id, "S6 REG3 read returns DEADBEEF, OKAY");
+    $display("  %9d %7d   %s", n_bvalid_order, f_bvalid_order, "S8 BVALID rises after AW+W");
+    $display("  %9d %7d   %s", n_rvalid_order, f_rvalid_order, "S8 RVALID rises after AR");
+    $display("  %9d %7d   %s", n_rdata_stab, f_rdata_stab, "S9 RDATA stable while waiting");
+    $display("  %9d %7d   %s", n_rresp_stab, f_rresp_stab, "S9 RRESP stable while waiting");
+    $display("  %9d %7d   %s", n_bresp_stab, f_bresp_stab, "S9 BRESP stable while waiting");
+    $display("  ----------------------------------------");
+    $display("  Info: W handshakes with WSTRB=0 (legal) : %0d", info_wstrb_zero);
+    $display("  Total rule failures                    : %0d", sva_fail_count);
     if (sva_fail_count == 0)
-      $display("  ** ALL ASSERTIONS PASSED **");
+      $display("  ** NO PROTOCOL VIOLATIONS **");
     else
-      $display("  ** %0d ASSERTION(S) FAILED **", sva_fail_count);
+      $display("  ** %0d PROTOCOL VIOLATION(S) **", sva_fail_count);
     $display("========================================");
   end
 

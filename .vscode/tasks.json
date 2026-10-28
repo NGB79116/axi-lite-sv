@@ -3,8 +3,9 @@
   "tasks": [
     {
       "label": "Run AXI Simulation",
-      "type": "shell",
-      "command": "iverilog -g2012 -o axi_sim rtl/axi_lite_slave.sv tb/axi_lite_tb.sv && vvp axi_sim",
+      "type": "process",
+      "command": "cmd",
+      "args": ["/c", "${workspaceFolder}\\run.bat"],
       "group": {
         "kind": "build",
         "isDefault": true

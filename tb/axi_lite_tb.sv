@@ -11,14 +11,14 @@
 //   TEST 6  - Write to invalid address (expect SLVERR)
 //   TEST 7  - Read from invalid address (expect SLVERR)
 //   TEST 8  - Byte strobe partial write
-//   TEST 9  - Back-to-back write transactions
-//   TEST 10 - Back-to-back read transactions
-//   TEST 11 - Write then immediate read (no gap)
+//   TEST 9  - Consecutive writes (task-paced, idle cycles between)
+//   TEST 10 - Consecutive reads (task-paced, idle cycles between)
+//   TEST 11 - Write then read via the tasks
 //   TEST 12 - Randomized write/read sequence
 //   TEST 13 - Back-pressure (delayed BREADY/RREADY)
 //   TEST 14 - Back-to-back reads with ARVALID held high
 //   TEST 15 - AW/W skew (AW first, W first, together)
-//   TEST 16 - Coverage gaps (write->read, 1-cycle B/R back-pressure)
+//   TEST 16 - Coverage gaps (write->read, 1-cycle B/R back-pressure, max-rate B2B writes)
 // ============================================================
 
 `timescale 1ns/1ps
@@ -555,6 +555,7 @@ module axi_lite_tb;
   reg [DATA_W-1:0] shadow_regs [0:2];  // mirrors what we wrote
   integer cov_wr_rd_before;            // TEST 16 coverage bin snapshots
   integer cov_1cyc_before;
+  integer t16_b_t;                     // TEST 16d first B handshake time
 
   initial begin
     $dumpfile("axi_lite_tb.vcd");
@@ -691,37 +692,37 @@ module axi_lite_tb;
     check_data("strobe high half",   rd_data, 32'h5678_FFFF);
 
     // ─────────────────────────────
-    // TEST 9: Back-to-back writes
+    // TEST 9: Consecutive writes (not back-to-back on the bus)
     // ─────────────────────────────
-    $display("\n--- TEST 9: Back-to-Back Writes ---");
+    $display("\n--- TEST 9: Consecutive Writes ---");
     apply_reset();
     axi_write(4'h0, 32'h0000_0001, 4'hF, wr_resp);
-    check("B2B write 1 OKAY", wr_resp === RESP_OKAY);
+    check("consecutive write 1 OKAY", wr_resp === RESP_OKAY);
     axi_write(4'h4, 32'h0000_0002, 4'hF, wr_resp);
-    check("B2B write 2 OKAY", wr_resp === RESP_OKAY);
+    check("consecutive write 2 OKAY", wr_resp === RESP_OKAY);
     axi_write(4'h8, 32'h0000_0003, 4'hF, wr_resp);
-    check("B2B write 3 OKAY", wr_resp === RESP_OKAY);
-    axi_read(4'h0, rd_data, rd_resp); check_data("B2B REG0", rd_data, 32'h1);
-    axi_read(4'h4, rd_data, rd_resp); check_data("B2B REG1", rd_data, 32'h2);
-    axi_read(4'h8, rd_data, rd_resp); check_data("B2B REG2", rd_data, 32'h3);
+    check("consecutive write 3 OKAY", wr_resp === RESP_OKAY);
+    axi_read(4'h0, rd_data, rd_resp); check_data("consecutive REG0", rd_data, 32'h1);
+    axi_read(4'h4, rd_data, rd_resp); check_data("consecutive REG1", rd_data, 32'h2);
+    axi_read(4'h8, rd_data, rd_resp); check_data("consecutive REG2", rd_data, 32'h3);
 
     // ─────────────────────────────
-    // TEST 10: Back-to-back reads
+    // TEST 10: Consecutive reads (not back-to-back on the bus)
     // ─────────────────────────────
-    $display("\n--- TEST 10: Back-to-Back Reads ---");
+    $display("\n--- TEST 10: Consecutive Reads ---");
     // Registers still hold values from TEST 9
-    axi_read(4'h0, rd_data, rd_resp); check_data("B2B rd REG0", rd_data, 32'h1);
-    axi_read(4'h4, rd_data, rd_resp); check_data("B2B rd REG1", rd_data, 32'h2);
-    axi_read(4'h8, rd_data, rd_resp); check_data("B2B rd REG2", rd_data, 32'h3);
+    axi_read(4'h0, rd_data, rd_resp); check_data("consecutive read REG0", rd_data, 32'h1);
+    axi_read(4'h4, rd_data, rd_resp); check_data("consecutive read REG1", rd_data, 32'h2);
+    axi_read(4'h8, rd_data, rd_resp); check_data("consecutive read REG2", rd_data, 32'h3);
 
     // ─────────────────────────────
-    // TEST 11: Write then immediate read
+    // TEST 11: Write then read
     // ─────────────────────────────
-    $display("\n--- TEST 11: Write then Immediate Read ---");
+    $display("\n--- TEST 11: Write then Read ---");
     apply_reset();
     axi_write(4'h0, 32'hDEAD_C0DE, 4'hF, wr_resp);
     axi_read (4'h0, rd_data, rd_resp);
-    check_data("immediate readback", rd_data, 32'hDEAD_C0DE);
+    check_data("write-then-read readback", rd_data, 32'hDEAD_C0DE);
 
     // ─────────────────────────────
     // TEST 12: Randomized sequence
@@ -918,6 +919,7 @@ module axi_lite_tb;
     //   a) write followed by a read, as fast as possible
     //   b) B with exactly 1 cycle of BREADY back-pressure
     //   c) R with exactly 1 cycle of RREADY back-pressure
+    //   d) back-to-back writes at the DUT's maximum rate
     // ─────────────────────────────
     $display("\n--- TEST 16: Coverage Gaps ---");
     apply_reset();
@@ -956,7 +958,7 @@ module axi_lite_tb;
     //   address on separate channels (the read may see the
     //   old or new value), so this read targets a DIFFERENT
     //   register (REG2) and its data is exactly predictable.
-    cov_wr_rd_before = u_cov.cov_seq_wr_then_rd;
+    cov_wr_rd_before = u_cov.cov_seq_rd_ovl_wr;
     txn_mon_start;
     @(posedge clk); #1;
     s_awaddr = 4'h4; s_awvalid = 1;
@@ -978,10 +980,10 @@ module axi_lite_tb;
     txn_mon_en = 0;
     $display("  [INFO] a-ii) B hs @%0d ns, AR hs @%0d ns, gap %0d cycle(s)",
              txn_b_t, txn_ar_t, (txn_ar_t - txn_b_t) / CLK_PERIOD);
-    if (u_cov.cov_seq_wr_then_rd > cov_wr_rd_before)
-      $display("  [INFO] a-ii) write-then-read bin HIT");
+    if (u_cov.cov_seq_rd_ovl_wr > cov_wr_rd_before)
+      $display("  [INFO] a-ii) read-overlapping-write bin HIT");
     else
-      $display("  [INFO] a-ii) write-then-read bin not hit");
+      $display("  [INFO] a-ii) read-overlapping-write bin not hit");
     check("Overlapped: write BRESP OKAY", wr_resp === RESP_OKAY);
     check_data("Overlapped: REG2 read data", rd_data, 32'h5EED_0008);
     check("Overlapped: REG2 read OKAY", rd_resp === RESP_OKAY);
@@ -1032,6 +1034,41 @@ module axi_lite_tb;
           u_cov.cov_r_1cyc == cov_1cyc_before + 1);
     @(posedge clk);
 
+    // d) Back-to-back writes at the DUT's maximum rate:
+    //    the next AWVALID/WVALID is raised #1 after the
+    //    B handshake, with no idle edge in between
+    cov_1cyc_before = u_cov.cov_seq_b2b_write;
+    txn_mon_start;
+    @(posedge clk); #1;
+    s_awaddr = 4'h4; s_awvalid = 1;
+    s_wdata  = 32'hB2B0_0004; s_wstrb = 4'hF; s_wvalid = 1;
+    fork
+      aw_wait_hs;
+      w_wait_hs;
+    join
+    s_bready = 1;
+    b_wait_hs(wr_resp);
+    t16_b_t = txn_b_t;
+    check("B2B max rate: write 1 BRESP OKAY", wr_resp === RESP_OKAY);
+    s_awaddr = 4'h8; s_awvalid = 1;     // same #1 slot as BREADY drop
+    s_wdata  = 32'hB2B0_0008; s_wvalid = 1;
+    fork
+      aw_wait_hs;
+      w_wait_hs;
+    join
+    s_bready = 1;
+    b_wait_hs(wr_resp);
+    txn_mon_en = 0;
+    $display("  [INFO] d) B hs @%0d ns, next AW hs @%0d ns, gap %0d cycle(s)",
+             t16_b_t, txn_aw_t, (txn_aw_t - t16_b_t) / CLK_PERIOD);
+    check("B2B max rate: write 2 BRESP OKAY", wr_resp === RESP_OKAY);
+    check("B2B max rate: back-to-back write bin hit",
+          u_cov.cov_seq_b2b_write == cov_1cyc_before + 1);
+    axi_read(4'h4, rd_data, rd_resp);
+    check_data("B2B max rate: REG1 readback", rd_data, 32'hB2B0_0004);
+    axi_read(4'h8, rd_data, rd_resp);
+    check_data("B2B max rate: REG2 readback", rd_data, 32'hB2B0_0008);
+
     // ─────────────────────────────
     // Final report
     // ─────────────────────────────
@@ -1058,6 +1095,14 @@ module axi_lite_tb;
   initial begin
     #500_000;
     $display("[TIMEOUT] Simulation exceeded limit!");
+    $display("\n========================================");
+    $display("  RESULTS: %0d PASSED  |  %0d FAILED (before timeout)",
+             pass_count, fail_count);
+    $display("  MONITOR: %0d protocol violation(s)",
+             u_sva.sva_fail_count);
+    $display("========================================");
+    $display("  ** FAILED: simulation timeout **");
+    $display("========================================\n");
     u_cov.print_coverage();
     $finish;
   end
