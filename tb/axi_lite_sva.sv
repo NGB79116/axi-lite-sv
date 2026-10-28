@@ -18,6 +18,8 @@
 //   );
 // ============================================================
 
+`timescale 1ns/1ps
+
 module axi_lite_sva #(
   parameter int DATA_W = 32,
   parameter int ADDR_W = 4
@@ -374,6 +376,52 @@ module axi_lite_sva #(
         $display("[SVA FAIL] RVALID rose without prior AR handshake at %0t", $time);
         sva_fail_count = sva_fail_count + 1;
       end
+    end
+  end
+
+  // ──────────────────────────────────────────────────────
+  // SECTION 9 — Slave Payload Stability
+  // RDATA/RRESP must hold while RVALID=1, RREADY=0.
+  // BRESP must hold while BVALID=1, BREADY=0.
+  // ──────────────────────────────────────────────────────
+  logic [DATA_W-1:0] prev_rdata;
+  logic [1:0]        prev_rresp;
+  logic [1:0]        prev_bresp;
+  logic              r_wait_prev;   // last cycle: RVALID=1, RREADY=0
+  logic              b_wait_prev;   // last cycle: BVALID=1, BREADY=0
+
+  always_ff @(posedge clk) begin
+    prev_rdata  <= s_rdata;
+    prev_rresp  <= s_rresp;
+    prev_bresp  <= s_bresp;
+    r_wait_prev <= rst_n && s_rvalid && !s_rready;
+    b_wait_prev <= rst_n && s_bvalid && !s_bready;
+  end
+
+  always_ff @(posedge clk) begin
+    if (rst_n) begin
+
+      // RDATA must be stable while RVALID=1, RREADY=0
+      if (r_wait_prev && s_rvalid && prev_rdata !== s_rdata) begin
+        $display("[SVA FAIL] RDATA changed while RVALID=1, RREADY=0: 0x%08h -> 0x%08h at %0t",
+                 prev_rdata, s_rdata, $time);
+        sva_fail_count = sva_fail_count + 1;
+      end
+
+      // RRESP must be stable while RVALID=1, RREADY=0
+      if (r_wait_prev && s_rvalid && prev_rresp !== s_rresp) begin
+        $display("[SVA FAIL] RRESP changed while RVALID=1, RREADY=0: 2'b%b -> 2'b%b at %0t",
+                 prev_rresp, s_rresp, $time);
+        sva_fail_count = sva_fail_count + 1;
+      end
+
+      // BRESP must be stable while BVALID=1, BREADY=0
+      if (b_wait_prev && s_bvalid && prev_bresp !== s_bresp) begin
+        $display("[SVA FAIL] BRESP changed while BVALID=1, BREADY=0: 2'b%b -> 2'b%b at %0t",
+                 prev_bresp, s_bresp, $time);
+        sva_fail_count = sva_fail_count + 1;
+      end
+
     end
   end
 

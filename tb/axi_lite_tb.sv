@@ -15,6 +15,8 @@
 //   TEST 10 - Back-to-back read transactions
 //   TEST 11 - Write then immediate read (no gap)
 //   TEST 12 - Randomized write/read sequence
+//   TEST 13 - Back-pressure (delayed BREADY/RREADY)
+//   TEST 14 - Back-to-back reads with ARVALID held high
 // ============================================================
 
 `timescale 1ns/1ps
@@ -306,6 +308,96 @@ module axi_lite_tb;
       end
     end
   end
+
+  // ──────────────────────────────────────────────
+  // TEST 14 handshake counter (passive)
+  // Counts AR and R handshakes while enabled and
+  // captures RDATA of the first two R beats.
+  // ──────────────────────────────────────────────
+  reg              t14_mon_en;
+  integer          t14_ar_cnt;
+  integer          t14_r_cnt;
+  reg [DATA_W-1:0] t14_rdata [0:1];
+
+  initial t14_mon_en = 0;
+
+  always @(posedge clk) begin
+    if (t14_mon_en) begin
+      if (s_arvalid && s_arready)
+        t14_ar_cnt = t14_ar_cnt + 1;
+      if (s_rvalid && s_rready) begin
+        if (t14_r_cnt < 2) t14_rdata[t14_r_cnt] = s_rdata;
+        t14_r_cnt = t14_r_cnt + 1;
+      end
+    end
+  end
+
+  // ──────────────────────────────────────────────
+  // Task: ar_hold_read2
+  //   Two reads (0x0 then 0x4) with ARVALID held
+  //   high between them; AR and R driven directly.
+  //   rready_delay < 0 : RREADY high from the start
+  //   rready_delay >= 0: RREADY low until RVALID,
+  //                      then low for that many cycles
+  // ──────────────────────────────────────────────
+  task ar_hold_read2;
+    input integer rready_delay;
+    begin
+      t14_ar_cnt   = 0;
+      t14_r_cnt    = 0;
+      t14_rdata[0] = 'x;
+      t14_rdata[1] = 'x;
+
+      @(posedge clk); #1;
+      t14_mon_en = 1;
+      s_araddr   = 4'h0;
+      s_arvalid  = 1;
+      s_rready   = (rready_delay < 0);
+
+      fork
+        // AR: sample at the edge, so s_arready is the
+        // value the handshake actually used
+        begin : t14_ar
+          integer ta;
+          ta = 0;
+          @(posedge clk);
+          while (!s_arready && ta < 20) begin
+            @(posedge clk); ta = ta + 1;
+          end
+          #1; s_araddr = 4'h4;    // ARVALID stays high
+          ta = 0;
+          @(posedge clk);
+          while (!s_arready && ta < 20) begin
+            @(posedge clk); ta = ta + 1;
+          end
+          #1; s_arvalid = 0;
+        end
+
+        // R: optional back-pressure, then collect beats
+        begin : t14_r
+          integer tr;
+          if (rready_delay >= 0) begin
+            tr = 0;
+            @(posedge clk);
+            while (!s_rvalid && tr < 20) begin
+              @(posedge clk); tr = tr + 1;
+            end
+            repeat(rready_delay) @(posedge clk);
+            #1; s_rready = 1;
+          end
+          tr = 0;
+          while (t14_r_cnt < 2 && tr < 20) begin
+            @(posedge clk); tr = tr + 1;
+          end
+        end
+      join
+
+      #1;
+      s_rready   = 0;
+      t14_mon_en = 0;
+      @(posedge clk);
+    end
+  endtask
 
   // ──────────────────────────────────────────────
   // Main test sequence
@@ -610,16 +702,45 @@ module axi_lite_tb;
     @(posedge clk);
 
     // ─────────────────────────────
+    // TEST 14: Back-to-back reads, ARVALID held high
+    //   axi_read drops ARVALID after each handshake,
+    //   so AR and R are driven directly here.
+    // ─────────────────────────────
+    $display("\n--- TEST 14: B2B Reads with ARVALID Held High ---");
+    apply_reset();
+    axi_write(4'h0, 32'h1111_0000, 4'hF, wr_resp);
+    check("T14 REG0 wr OKAY", wr_resp === RESP_OKAY);
+    axi_write(4'h4, 32'h2222_0004, 4'hF, wr_resp);
+    check("T14 REG1 wr OKAY", wr_resp === RESP_OKAY);
+
+    // a) RREADY low for 3 cycles after RVALID
+    ar_hold_read2(3);
+    $display("  [INFO] a) AR handshakes=%0d  R handshakes=%0d",
+             t14_ar_cnt, t14_r_cnt);
+    check_data("T14a beat0 data", t14_rdata[0], 32'h1111_0000);
+    check("T14a AR==R count", t14_ar_cnt == t14_r_cnt);
+
+    // b) RREADY held high throughout
+    ar_hold_read2(-1);
+    $display("  [INFO] b) AR handshakes=%0d  R handshakes=%0d",
+             t14_ar_cnt, t14_r_cnt);
+    check_data("T14b beat0 data", t14_rdata[0], 32'h1111_0000);
+    check("T14b AR==R count", t14_ar_cnt == t14_r_cnt);
+
+    // ─────────────────────────────
     // Final report
     // ─────────────────────────────
     $display("\n========================================");
     $display("  RESULTS: %0d PASSED  |  %0d FAILED",
              pass_count, fail_count);
+    $display("  MONITOR: %0d protocol violation(s)",
+             u_sva.sva_fail_count);
     $display("========================================");
-    if (fail_count == 0)
+    if (fail_count == 0 && u_sva.sva_fail_count == 0)
       $display("  ** ALL TESTS PASSED **");
     else
-      $display("  ** %0d TEST(S) FAILED **", fail_count);
+      $display("  ** FAILED: %0d check(s), %0d monitor error(s) **",
+               fail_count, u_sva.sva_fail_count);
     $display("========================================\n");
 
     u_cov.print_coverage();
