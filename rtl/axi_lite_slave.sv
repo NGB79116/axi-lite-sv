@@ -196,18 +196,30 @@ module axi_lite_slave #(
 
   // ──────────────────────────────────────────────
   // READ ADDRESS CHANNEL (AR)
+  // At most one read outstanding: ARREADY pulses
+  // for one cycle only when no accepted address is
+  // still waiting for its R handshake.
   // ──────────────────────────────────────────────
+  logic rd_pending_r;                // AR accepted, R not yet accepted
+
   always_ff @(posedge clk) begin
     if (!rst_n) begin
-      s_arready <= 1'b0;
-      rd_addr_r <= '0;
+      s_arready    <= 1'b0;
+      rd_addr_r    <= '0;
+      rd_pending_r <= 1'b0;
     end else begin
       s_arready <= 1'b0;
 
-      if (s_arvalid && !s_rvalid) begin
+      if (s_arvalid && !s_arready && !rd_pending_r) begin
         s_arready <= 1'b1;          // acknowledge
-        rd_addr_r <= s_araddr;      // latch address
+        rd_addr_r <= s_araddr;      // latch address (held stable until handshake)
       end
+
+      // Read outstanding from AR handshake until R handshake
+      if (s_arvalid && s_arready)
+        rd_pending_r <= 1'b1;
+      if (s_rvalid && s_rready)
+        rd_pending_r <= 1'b0;
     end
   end
 
@@ -223,10 +235,12 @@ module axi_lite_slave #(
     end else begin
 
       if (s_arvalid && s_arready) begin
-        // Address accepted — prepare read data
+        // Address accepted — prepare read data.
+        // Only reachable with no read outstanding, so
+        // RDATA/RRESP never change while RVALID waits.
         s_rvalid <= 1'b1;
 
-        case (s_araddr)
+        case (rd_addr_r)
           4'h0:    begin s_rdata <= reg_file[0]; s_rresp <= RESP_OKAY;   end
           4'h4:    begin s_rdata <= reg_file[1]; s_rresp <= RESP_OKAY;   end
           4'h8:    begin s_rdata <= reg_file[2]; s_rresp <= RESP_OKAY;   end
